@@ -76,3 +76,11 @@ def test_nginx_tidy(request, fx, name):
         assert not re.search(r"\n\s*\n\}", conf), "blank line before closing brace"
         assert conf.endswith("}\n")
         assert conf.count("{") == conf.count("}")
+
+
+def test_static_root_has_no_directory_match(rendered_pwhl_nginx=None):
+    # `$uri/` makes nginx 403 on "/" when the build has no index.html (pwhl uses 404.html).
+    import pathlib
+    tpl = (pathlib.Path(__file__).parent.parent / "roostd/templates/nginx.conf.j2").read_text()
+    line = next(l for l in tpl.splitlines() if "try_files" in l)
+    assert "$uri/ " not in line and "$uri/index.html" in line

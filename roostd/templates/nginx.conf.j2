@@ -25,7 +25,7 @@
     root /var/www/{{ name }};
     index index.html;
     location / {
-        try_files $uri $uri/ $uri.html {{ frontend.fallback }};
+        try_files $uri $uri.html $uri/index.html {{ frontend.fallback }};
     }
 {% elif backend %}
     location / {
