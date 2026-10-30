@@ -1,0 +1,23 @@
+[Unit]
+Description=roost deploy daemon
+After=network.target
+
+[Service]
+User=nickg
+WorkingDirectory=/home/nickg/roost
+Environment=PATH=/home/nickg/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ROOST_HOME=/home/nickg/.roost
+EnvironmentFile=/home/nickg/.roost/roostd.env
+ExecStart=/home/nickg/roost/.venv/bin/uvicorn roostd.server:app --host 127.0.0.1 --port 8900
+Restart=always
+RestartSec=3
+# Builds (uv, npm/vite) run as children in this cgroup. On a 1 GB box, cap them so
+# a runaway build is OOM-killed here instead of taking down the live apps.
+MemoryHigh=450M
+MemoryMax=750M
+Nice=10
+CPUWeight=50
+IOWeight=50
+
+[Install]
+WantedBy=multi-user.target

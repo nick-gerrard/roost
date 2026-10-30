@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# roost-apply <name> <subdomain|->  — the ONLY privileged action roostd performs.
+#
+# Validates the files roostd staged for <name>, backs up whatever they replace,
+# installs them, obtains a TLS cert on first deploy, and restarts/reloads.
+# Installed root:root 0755 at /usr/local/sbin/roost-apply; allow-listed for the
+# roost user in /etc/sudoers.d/roostd. Config: /etc/roost/roost.conf (root-owned).
+#
+# Validation keeps a bad or malicious manifest from turning this into "run
+# anything as root": units must run as ROOST_USER, use a fixed set of
+# directives, and only the app's own domain/paths can appear in nginx config.
+set -euo pipefail
+umask 022
+
+ROOT="${ROOST_TEST_ROOT:-}"   # test hook only; sudo's env_reset strips it in production
+# shellcheck source=/dev/null
+source "$ROOT/etc/roost/roost.conf"   # ROOST_USER, ROOST_HOME, APPS_ROOT, DOMAIN
+
+NAME="${1:?usage: roost-apply <name> <subdomain|->}"
+SUB="${2:?usage: roost-apply <name> <subdomain|->}"
+NAME_RE='^[a-z0-9][a-z0-9-]{0,40}$'
+[[ "$NAME" =~ $NAME_RE ]] || { echo "bad app name"; exit 2; }
+[[ "$SUB" == "-" || "$SUB" =~ $NAME_RE ]] || { echo "bad subdomain"; exit 2; }
+[[ "$SUB" == "roost" ]] && { echo "subdomain 'roost' is reserved"; exit 2; }
+FQDN=""; [[ "$SUB" != "-" ]] && FQDN="$SUB.$DOMAIN"
+
+STAGED="$ROOST_HOME/staged/$NAME"
+[[ -d "$STAGED" && ! -L "$STAGED" ]] || { echo "no staged dir $STAGED"; exit 2; }
+# Snapshot into a root-only dir so files can't be swapped between validation and install.
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+cp -RP "$STAGED/." "$WORK/"
+STAGED="$WORK"
+
+SYSTEMD="$ROOT/etc/systemd/system"
+AVAIL="$ROOT/etc/nginx/sites-available"
+ENABLED="$ROOT/etc/nginx/sites-enabled"
+WWW="$ROOT/var/www/$NAME"
+BACKUP="$ROOT/var/backups/roost/$NAME/$(date +%Y%m%d-%H%M%S)"
+ADOPT="$ROOT/etc/roost/adopt/$NAME"
+
+die() { echo "roost-apply: $*" >&2; exit 1; }
+
+# Refuse to clobber a file roost didn't write, unless root has marked the app adoptable.
+check_owned() {
+    local target="$1"
+    [[ -e "$target" ]] || return 0
+    head -n1 "$target" | grep -qx '# roost-managed' && return 0
+    [[ -e "$ADOPT" ]] && return 0
+    die "$target exists and is not roost-managed (sudo touch $ADOPT to adopt it)"
+}
+
+validate_unit() {
+    local f="$1" line key val
+    head -n1 "$f" | grep -qx '# roost-managed' || die "$f: missing roost-managed marker"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" =~ ^\[(Unit|Service|Install)\]$ ]] && continue
+        key="${line%%=*}"; val="${line#*=}"
+        case "$key" in
+            Description|After|Restart|RestartSec|WantedBy|Environment) ;;
+            User) [[ "$val" == "$ROOST_USER" ]] || die "$f: User must be $ROOST_USER" ;;
+            WorkingDirectory) [[ "$val" == "$APPS_ROOT"/* && "$val" != *..* ]] || die "$f: bad WorkingDirectory" ;;
+            EnvironmentFile) [[ "$val" == "-$ROOST_HOME/env/"*.env && "$val" != *..* ]] || die "$f: bad EnvironmentFile" ;;
+            ExecStart)
+                [[ "$val" == /usr/bin/node\ * || ( "$val" == "$APPS_ROOT"/* && "$val" != *..* ) ]] \
+                    || die "$f: ExecStart must be node or a binary under $APPS_ROOT" ;;
+            *) die "$f: directive '$key' not allowed" ;;
+        esac
+    done < "$f"
+}
+
+# only <file> <selector-regex> <allowed-regex> <msg>: every line matching the
+# selector must also match the allowed pattern.
+only() {
+    local lines
+    lines="$(grep -E "$2" "$1" || true)"
+    [[ -z "$lines" ]] && return 0
+    if grep -vqE "$3" <<<"$lines"; then die "$1: $4"; fi
+}
+
+validate_nginx() {
+    local f="$1" fq="${FQDN//./\\.}"
+    head -n1 "$f" | grep -qx '# roost-managed' || die "$f: missing roost-managed marker"
+    only "$f" '^\s*server_name\s' "^\s*server_name\s+$fq;\s*$" "server_name must be $FQDN"
+    only "$f" '^\s*include\s' '^\s*include\s+/etc/letsencrypt/options-ssl-nginx\.conf;\s*$' "include not allowed"
+    only "$f" '^\s*ssl_certificate(_key)?\s' "^\s*ssl_certificate(_key)?\s+/etc/letsencrypt/live/$fq/(fullchain|privkey)\.pem;\s*$" \
+        "certificate must live under /etc/letsencrypt/live/$FQDN"
+    only "$f" '^\s*ssl_dhparam\s' '^\s*ssl_dhparam\s+/etc/letsencrypt/ssl-dhparams\.pem;\s*$' "bad ssl_dhparam"
+    only "$f" '^\s*root\s' "^\s*root\s+/var/www/$NAME;\s*$" "root must be /var/www/$NAME"
+    only "$f" '^\s*proxy_pass\s' '^\s*proxy_pass\s+http://127\.0\.0\.1:[0-9]+(/|/api/)?;\s*$' "proxy_pass must target 127.0.0.1"
+    # Allow-list: every line must be a directive the template emits, one per line. The
+    # per-directive checks above only look at line starts, so `listen 80; include /x;`
+    # or `access_log /etc/cron.d/x;` (nginx opens logs as root) would slip through.
+    local ws='[[:space:]]*' arg='[^;[:space:]]+'
+    local ok="^$ws(\$|#.*|\}|server \{|location (/|/api/) \{"
+    ok+="|listen (443 ssl http2|80);|server_name $arg;|include $arg;|root $arg;|proxy_pass $arg;"
+    ok+="|ssl_certificate(_key)? $arg;|ssl_dhparam $arg;|index [A-Za-z0-9._ -]+;|try_files [^;]+;"
+    ok+="|return 301 https://\\\$host\\\$request_uri;|proxy_http_version 1\\.1;|proxy_buffering off;"
+    ok+="|proxy_read_timeout [0-9]+[smh];|proxy_set_header [A-Za-z-]+ [^;]+;)$ws\$"
+    if grep -vqE "$ok" "$f"; then
+        die "$f: contains a directive roost does not generate: $(grep -vE "$ok" "$f" | head -n1)"
+    fi
+    if grep -qE '^\s*(alias|load_module|perl|lua_|js_|access_by|content_by|user)\b' "$f"; then
+        die "$f: disallowed directive"
+    fi
+}
+
+backup() {
+    local src="$1"
+    [[ -e "$src" ]] || return 0
+    mkdir -p "$BACKUP"; cp -a "$src" "$BACKUP/"
+}
+
+nginx_reload() {
+    if ! nginx -t 2>&1; then
+        echo "nginx -t failed; restoring previous config" >&2
+        if [[ -e "$BACKUP/$NAME" ]]; then cp -a "$BACKUP/$NAME" "$AVAIL/$NAME"; else rm -f "$ENABLED/$NAME" "$AVAIL/$NAME"; fi
+        nginx -t && systemctl reload nginx
+        die "nginx config rejected"
+    fi
+    systemctl reload nginx
+}
+
+install_site() {   # $1 = staged conf
+    backup "$AVAIL/$NAME"
+    install -m 0644 "$1" "$AVAIL/$NAME"
+    ln -sfn "$AVAIL/$NAME" "$ENABLED/$NAME"
+    nginx_reload
+}
+
+# ---- validate everything before changing anything ------------------------
+units=()
+shopt -s nullglob
+for unit in "$STAGED"/*.service; do
+    base="$(basename "$unit")"
+    [[ "$base" == "$NAME-api.service" || "$base" == "$NAME-frontend.service" ]] || die "unexpected unit $base"
+    validate_unit "$unit"
+    check_owned "$SYSTEMD/$base"
+    units+=("$base")
+done
+
+if [[ -n "$FQDN" ]]; then
+    [[ -f "$STAGED/$NAME.nginx.conf" && -f "$STAGED/$NAME.nginx.http.conf" ]] || die "missing staged nginx config"
+    validate_nginx "$STAGED/$NAME.nginx.conf"
+    validate_nginx "$STAGED/$NAME.nginx.http.conf"
+    check_owned "$AVAIL/$NAME"
+    # no *other* enabled site may already claim this hostname
+    for other in "$ENABLED"/*; do
+        [[ "$(basename "$other")" == "$NAME" ]] && continue
+        grep -qE "^\s*server_name\s+([^;]*\s)?${FQDN//./\\.}(\s|;)" "$other" 2>/dev/null \
+            && die "$FQDN is already served by $(basename "$other")"
+    done
+fi
+
+# ---- apply ----------------------------------------------------------------
+if [[ -d "$STAGED/www" ]]; then
+    mkdir -p "$WWW"
+    rsync -rt --delete --no-links "$STAGED/www/" "$WWW/"
+    chown -R "$ROOST_USER:$ROOST_USER" "$WWW"
+    echo "synced static files to $WWW"
+fi
+
+for base in "${units[@]}"; do
+    backup "$SYSTEMD/$base"
+    install -m 0644 "$STAGED/$base" "$SYSTEMD/$base"
+done
+if (( ${#units[@]} )); then
+    systemctl daemon-reload
+    for base in "${units[@]}"; do
+        svc="${base%.service}"
+        systemctl enable -q "$svc"
+        systemctl restart "$svc"
+        sleep 1
+        systemctl is-active -q "$svc" || { journalctl -u "$svc" -n 30 --no-pager >&2; die "$svc failed to start"; }
+        echo "restarted $svc"
+    done
+fi
+
+if [[ -n "$FQDN" ]]; then
+    cert="$ROOT/etc/letsencrypt/live/$FQDN/fullchain.pem"
+    if [[ ! -e "$cert" ]]; then
+        echo "no cert for $FQDN yet: serving HTTP-only while certbot issues one"
+        install_site "$STAGED/$NAME.nginx.http.conf"
+        certbot certonly --nginx -n --cert-name "$FQDN" -d "$FQDN"
+    elif ! openssl x509 -checkend $((14*86400)) -noout -in "$cert" >/dev/null; then
+        certbot certonly --nginx -n --cert-name "$FQDN" -d "$FQDN" --keep-until-expiring
+    fi
+    install_site "$STAGED/$NAME.nginx.conf"
+    echo "nginx serving https://$FQDN"
+fi
+
+rm -f "$ADOPT"   # adoption is one-shot; from here on the files are roost-managed
+echo "roost-apply $NAME: ok"

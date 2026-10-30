@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# roostctl — talk to roostd from your laptop. No SSH required.
+#
+# Config: ~/.config/roost/config (created by `roostctl login`), or env vars:
+#   ROOST_URL=https://roost.nickgerrard.dev
+#   ROOST_SECRET=<hex secret from the server's ~/.roost/roostd.env>
+set -euo pipefail
+
+CONF="$HOME/.config/roost/config"
+[[ -f "$CONF" ]] && source "$CONF"
+ROOST_URL="${ROOST_URL:-https://roost.nickgerrard.dev}"
+OWNER="${ROOST_GITHUB_OWNER:-nick-gerrard}"
+
+usage() {
+    cat <<EOF
+roostctl <command>
+
+  login [ssh-host]              fetch the secret from the server into $CONF
+  status                        list registered apps + ports
+  deploy <app> [ref]            deploy now (default ref: main)
+  logs <app> [lines]            tail the deploy log
+  env push <app> <file> [kind]  upload env vars; kind: runtime (default) | frontend | build
+  webhook <repo> [push|ci-pass] add the GitHub webhook (needs gh auth)
+  init                          print a starter deploy.toml
+EOF
+}
+
+need_secret() { : "${ROOST_SECRET:?run 'roostctl login' first}"; }
+api() { need_secret; curl -fsS -H "Authorization: Bearer $ROOST_SECRET" "$@"; }
+pretty() { if command -v jq >/dev/null; then jq "$@"; else cat; fi; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  login)
+    host="${1:-linode}"
+    secret=$(ssh "$host" "sed -n 's/^ROOST_SECRET=//p' ~/.roost/roostd.env")
+    [[ -n "$secret" ]] || { echo "no secret found on $host"; exit 1; }
+    mkdir -p "$(dirname "$CONF")"; umask 077
+    printf 'ROOST_URL=%s\nROOST_SECRET=%s\n' "$ROOST_URL" "$secret" > "$CONF"
+    echo "saved $CONF" ;;
+  status)
+    api "$ROOST_URL/status" | pretty . ;;
+  deploy)
+    app="${1:?app}"; ref="${2:-main}"
+    api -X POST "$ROOST_URL/deploy/$app?ref=$ref" | pretty .
+    echo "follow with: roostctl logs $app" ;;
+  logs)
+    api "$ROOST_URL/logs/${1:?app}?tail=${2:-80}" | pretty -r .log ;;
+  env)
+    [[ "${1:-}" == push ]] || { usage; exit 1; }
+    app="${2:?app}"; file="${3:?env file}"; kind="${4:-runtime}"
+    [[ "$kind" == runtime ]] && kind=""
+    api -X POST --data-binary @"$file" "$ROOST_URL/env/$app?kind=$kind" | pretty . ;;
+  webhook)
+    need_secret
+    repo="${1:?repo name}"; mode="${2:-push}"
+    case "$mode" in push) ev=push ;; ci-pass) ev=workflow_run ;; *) usage; exit 1 ;; esac
+    gh api "repos/$OWNER/$repo/hooks" -X POST \
+      -f name=web -F active=true -f "events[]=$ev" \
+      -f "config[url]=$ROOST_URL/hooks/github" \
+      -f config[content_type]=json -f "config[secret]=$ROOST_SECRET" --jq '"hook \(.id) -> \(.config.url) [\(.events|join(","))]"' ;;
+  init)
+    cat <<'EOF'
+# deploy.toml — see https://github.com/nick-gerrard/roost#deploytoml
+name = "myapp"            # service names: myapp-api / myapp-frontend
+subdomain = "myapp"       # -> https://myapp.nickgerrard.dev  (omit for a worker)
+on = "push"               # or "ci-pass" to deploy only after GitHub Actions passes
+
+[backend]                 # python + uv; nginx proxies /api/* here (prefix stripped)
+workdir = "backend"
+start = "uvicorn main:app --host 127.0.0.1 --port {port}"
+migrate = "alembic upgrade head"
+health = "/health"
+
+[frontend]                # SvelteKit; built on the server with PUBLIC_API_URL=https://<sub>.nickgerrard.dev/api
+kind = "static"           # or "node" for adapter-node
+EOF
+    ;;
+  *) usage; exit 1 ;;
+esac

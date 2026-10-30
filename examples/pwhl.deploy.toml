@@ -1,0 +1,14 @@
+# Deployed by roost (https://github.com/nick-gerrard/roost): deploys after CI passes on main.
+name = "pwhl"
+subdomain = "pwhl"
+on = "ci-pass"
+
+[backend]
+workdir = "backend"
+start = "uvicorn main:app --host 127.0.0.1 --port {port}"
+migrate = "alembic upgrade head"
+health = "/"
+
+[frontend]
+kind = "static"                   # adapter-static, fallback page 404.html
+fallback = "/404.html"

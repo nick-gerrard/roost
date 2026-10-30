@@ -1,0 +1,20 @@
+# roost-managed
+[Unit]
+Description={{ name }} Frontend (roost)
+After=network.target
+
+[Service]
+User={{ user }}
+WorkingDirectory={{ app_dir }}/{{ frontend.dir }}/{{ frontend.output }}
+EnvironmentFile=-{{ frontend_env_file }}
+Environment=PORT={{ frontend_port }}
+Environment=HOST=127.0.0.1
+{% if backend_port %}
+Environment=INTERNAL_API_URL=http://127.0.0.1:{{ backend_port }}
+{% endif %}
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

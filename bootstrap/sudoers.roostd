@@ -1,0 +1,4 @@
+# /etc/sudoers.d/roostd  (root:root 0440) — installed by bootstrap/install.sh
+# roostd runs as nickg; the only thing it may do as root without a password is
+# run roost-apply, which validates everything it installs.
+nickg ALL=(root) NOPASSWD: /usr/local/sbin/roost-apply

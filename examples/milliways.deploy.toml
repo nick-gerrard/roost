@@ -1,0 +1,14 @@
+# Deployed by roost (https://github.com/nick-gerrard/roost): push to main -> live.
+name = "milliways"
+subdomain = "milliways"
+on = "push"
+
+[backend]
+project = "."                     # uv project (and .venv) live at the repo root
+workdir = "backend"
+start = "uvicorn app.main:app --host 127.0.0.1 --port {port}"
+migrate = "alembic upgrade head"
+health = "/health"
+
+[frontend]
+kind = "node"                     # adapter-node; built on the server

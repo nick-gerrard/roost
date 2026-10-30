@@ -1,0 +1,15 @@
+# roost-managed
+[Unit]
+Description={{ name }} API (roost)
+After=network.target postgresql.service
+
+[Service]
+User={{ user }}
+WorkingDirectory={{ app_dir }}/{{ backend.workdir }}
+EnvironmentFile=-{{ env_file }}
+ExecStart={{ venv_bin }}/{{ start }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
