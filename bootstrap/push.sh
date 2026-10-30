@@ -50,5 +50,5 @@ EOF
 fi
 
 # Restart roostd if it's installed (Restart=always brings it back; no sudo needed).
-ssh "$HOST" 'pkill -u "$USER" -f "uvicorn roostd.server:app" && echo "roostd restarted" || true'
+ssh "$HOST" 'pkill -u "$USER" -f "[u]vicorn roostd.server:app" && echo "roostd restarted" || true'
 echo "pushed roost to $HOST:~/roost"
