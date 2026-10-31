@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from conftest import stage
+from conftest import GO_MANIFEST, stage, stage_go
 
 
 @pytest.fixture
@@ -84,3 +84,44 @@ def test_static_root_has_no_directory_match(rendered_pwhl_nginx=None):
     tpl = (pathlib.Path(__file__).parent.parent / "roostd/templates/nginx.conf.j2").read_text()
     line = next(l for l in tpl.splitlines() if "try_files" in l)
     assert "$uri/ " not in line and "$uri/index.html" in line
+
+
+def test_go_unit_execstart_and_env(dirs):
+    staged, app, rec = stage_go(dirs)
+    text = (staged / "scruples-api.service").read_text()
+    assert f"ExecStart={app}/app\n" in text
+    assert "/./" not in text and ".venv" not in text
+    assert f"Environment=SCRUPLES_ADDR=127.0.0.1:{rec.backend_port}\n" in text
+    assert "Environment=OTHER=static value\n" in text
+    assert "EnvironmentFile=-" in text
+    assert "{port}" not in text
+
+
+def test_go_unit_project_subdir(dirs):
+    m = GO_MANIFEST.replace('workdir = "."', 'workdir = "."\nproject = "srv"')
+    staged, app, _ = stage_go(dirs, m)
+    assert f"ExecStart={app}/srv/app\n" in (staged / "scruples-api.service").read_text()
+
+
+def test_python_unit_has_no_env_lines(pwhl):
+    staged, app = pwhl
+    text = (staged / "pwhl-api.service").read_text()
+    assert f"ExecStart={app}/backend/.venv/bin/uvicorn" in text
+    assert "\nEnvironment=" not in text and "EnvironmentFile=-" in text
+
+
+def test_backend_only_nginx_proxies_root(dirs):
+    staged, _, rec = stage_go(dirs)
+    for f in ("scruples.nginx.conf", "scruples.nginx.http.conf"):
+        text = (staged / f).read_text()
+        assert "location /api/" not in text
+        if f == "scruples.nginx.conf":
+            assert "location / {" in text
+            assert f"proxy_pass http://127.0.0.1:{rec.backend_port};" in text
+    assert not (staged / "www").exists()
+
+
+def test_frontend_apps_keep_api_location(milliways):
+    staged, _ = milliways
+    text = (staged / "milliways.nginx.conf").read_text()
+    assert "location /api/" in text and "proxy_pass http://127.0.0.1:3002;" in text

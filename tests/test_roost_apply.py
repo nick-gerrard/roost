@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import REPO, stage
+from conftest import REPO, stage, stage_go
 
 DOCKER = shutil.which("docker") or "/opt/homebrew/bin/docker"
 CASES = Path(__file__).with_name("apply_cases.sh")
@@ -37,6 +37,11 @@ def _prepare(dirs, work: Path, home_target: str, apps_target: str):
             if f.is_file():
                 text = f.read_text().replace(str(home), home_target).replace(str(apps), apps_target)
                 f.write_text(text)
+    # backend-only go app (no frontend): nginx `location /` proxies straight to the backend
+    staged, _, _ = stage_go(dirs)
+    shutil.copytree(staged, out / "scruples")
+    for f in (out / "scruples").iterdir():
+        f.write_text(f.read_text().replace(str(home), home_target).replace(str(apps), apps_target))
 
 
 @pytest.fixture(scope="session")

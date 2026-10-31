@@ -45,7 +45,7 @@ def _logger(repo_name: str):
 
 def _commit(repo_name: str) -> str | None:
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=APPS_ROOT / repo_name,
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=deployer.app_dir(repo_name),
                               capture_output=True, text=True, timeout=5).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None

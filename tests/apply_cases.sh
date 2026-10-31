@@ -8,7 +8,7 @@ FQDN=milliways.nickgerrard.dev
 mkdir -p "$STUBS"
 
 stub() { printf '#!/bin/bash\n%s\n' "$2" > "$STUBS/$1"; chmod +x "$STUBS/$1"; }
-stub systemctl 'echo "systemctl $*" >> '"$LOG"'; exit 0'
+stub systemctl 'echo "systemctl $*" >> '"$LOG"'; [[ "$1" == is-active && -e '"$W"'/active_fail ]] && exit 3; exit 0'
 stub journalctl 'echo "journalctl $*" >> '"$LOG"'; exit 0'
 stub openssl 'echo "openssl $*" >> '"$LOG"'; exit 0'
 stub nginx 'echo "nginx $*" >> '"$LOG"'; [[ "$1" == -t && -e '"$W"'/nginx_fail ]] && exit 1; exit 0'
@@ -22,7 +22,7 @@ src="${@: -2:1}"; dst="${@: -1}"; find "$dst" -mindepth 1 -delete; cp -R "$src".
 export PATH="$STUBS:$PATH"
 
 reset() {
-    rm -rf "${FAKE:?}" "${TEST_HOME:?}"; : > "$LOG"; rm -f "$W/nginx_fail"
+    rm -rf "${FAKE:?}" "${TEST_HOME:?}"; : > "$LOG"; rm -f "$W/nginx_fail" "$W/active_fail"
     mkdir -p "$FAKE"/etc/{roost/adopt,systemd/system,nginx/sites-available,nginx/sites-enabled,letsencrypt/live} \
         "$FAKE/var/www" "$TEST_HOME"
     printf 'ROOST_USER=%s\nROOST_HOME=%s\nAPPS_ROOT=%s\nDOMAIN=nickgerrard.dev\n' \
@@ -196,6 +196,117 @@ case_no_subdomain_worker() {
 case_missing_nginx_files_with_subdomain() {
     reset; rm -f "$(S milliways.nginx.http.conf)"; apply milliways milliways
     need "fails" fails; need "msg" said "missing staged nginx config"
+}
+
+# ---- adoption of legacy units/sites -----------------------------------------
+LEGACY_UNIT="$FAKE/etc/systemd/system/legacy.service"
+LEGACY_SITE="$FAKE/etc/nginx/sites-available/legacy.example-site"
+legacy_setup() {   # a hand-written unit + a site serving the same FQDN, plus the adopt marker
+    reset
+    printf '[Service]\nExecStart=/usr/bin/legacy\n' > "$LEGACY_UNIT"
+    printf 'server {\n    server_name %s;\n}\n' "$FQDN" > "$LEGACY_SITE"
+    ln -s "$LEGACY_SITE" "$FAKE/etc/nginx/sites-enabled/legacy.example-site"
+    printf 'unit legacy.service\nsite legacy.example-site\n' > "$FAKE/etc/roost/adopt/milliways"
+}
+
+case_adopt_retires_legacy_unit_and_site() {
+    legacy_setup
+    apply milliways milliways
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "legacy site not a conflict" bash -c "! grep -q 'already served' '$OUT'"
+    need "legacy unit disabled+stopped" logged "systemctl disable -q --now legacy.service"
+    need "legacy unit file removed" test ! -e "$LEGACY_UNIT"
+    need "legacy unit backed up" grep -rq 'ExecStart=/usr/bin/legacy' "$FAKE/var/backups/roost/milliways"
+    need "legacy site backed up" grep -rq "server_name $FQDN;" "$FAKE/var/backups/roost/milliways"
+    need "legacy site removed from available" test ! -e "$LEGACY_SITE"
+    need "legacy site removed from enabled" test ! -e "$FAKE/etc/nginx/sites-enabled/legacy.example-site" -a ! -L "$FAKE/etc/nginx/sites-enabled/legacy.example-site"
+    need "new site live" grep -q 'listen 443 ssl' "$FAKE/etc/nginx/sites-available/milliways"
+    need "new units installed" test -f "$FAKE/etc/systemd/system/milliways-api.service"
+    need "marker removed" test ! -e "$FAKE/etc/roost/adopt/milliways"
+}
+
+case_legacy_site_conflict_without_marker_line() {
+    legacy_setup; printf 'unit legacy.service\n' > "$FAKE/etc/roost/adopt/milliways"
+    apply milliways milliways
+    need "fails" fails; need "says already served" said "already served by legacy.example-site"
+    need "legacy unit untouched" test -f "$LEGACY_UNIT"
+    need "no systemctl calls" bash -c "! grep -q '^systemctl' '$LOG'"
+}
+
+case_adopt_missing_legacy_files_ok() {
+    reset; printf 'unit legacy.service\nsite legacy.example-site\n' > "$FAKE/etc/roost/adopt/milliways"
+    apply milliways milliways
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "no disable call" bash -c "! grep -q 'disable' '$LOG'"
+    need "marker removed" test ! -e "$FAKE/etc/roost/adopt/milliways"
+}
+
+case_adopt_rollback_when_new_unit_fails() {
+    legacy_setup; touch "$W/active_fail"
+    apply milliways milliways
+    need "exit non-zero" fails; need "says failed to start" said "failed to start"
+    need "restoring message" said "restoring legacy legacy.service"
+    need "legacy unit restored" grep -q 'ExecStart=/usr/bin/legacy' "$LEGACY_UNIT"
+    need "legacy unit re-enabled" logged "systemctl enable -q --now legacy.service"
+    need "marker kept" test -e "$FAKE/etc/roost/adopt/milliways"
+    need "legacy site untouched" test -f "$LEGACY_SITE" -a -L "$FAKE/etc/nginx/sites-enabled/legacy.example-site"
+}
+
+case_adopt_rollback_when_nginx_rejects() {
+    legacy_setup; touch "$W/nginx_fail"
+    apply milliways milliways
+    need "exit non-zero" fails; need "says rejected" said "nginx config rejected"
+    need "legacy unit restored" grep -q 'ExecStart=/usr/bin/legacy' "$LEGACY_UNIT"
+    need "legacy unit re-enabled" logged "systemctl enable -q --now legacy.service"
+    need "legacy site restored" grep -q "server_name $FQDN;" "$LEGACY_SITE"
+    need "legacy site re-enabled" test "$(readlink "$FAKE/etc/nginx/sites-enabled/legacy.example-site")" = "$LEGACY_SITE"
+    need "new site removed" test ! -e "$FAKE/etc/nginx/sites-available/milliways"
+    need "marker kept" test -e "$FAKE/etc/roost/adopt/milliways"
+}
+
+bad_adopt() { # marker-content message
+    reset; printf '%s\n' "$1" > "$FAKE/etc/roost/adopt/milliways"
+    apply milliways milliways
+    need "exit non-zero (rc=$RC)" fails
+    need "message contains '$2' (got: $(head -c 300 "$OUT"))" said "$2"
+    need "nothing installed" nothing_installed
+    need "no systemctl calls" bash -c "! grep -q '^systemctl' '$LOG'"
+}
+case_adopt_rejects_unknown_kind()  { bad_adopt 'file /etc/passwd' "adopt: unknown entry"; }
+case_adopt_rejects_unit_traversal(){ bad_adopt 'unit ../x.service' "adopt: bad unit"; }
+case_adopt_rejects_unit_no_suffix(){ bad_adopt 'unit legacy' "adopt: bad unit"; }
+case_adopt_rejects_site_is_app()   { bad_adopt 'site milliways' "adopt: bad site"; }
+case_adopt_rejects_site_slash()    { bad_adopt 'site a/b' "adopt: bad site"; }
+case_adopt_rejects_extra_tokens()  { bad_adopt 'unit legacy.service extra' "adopt: bad line"; }
+case_adopt_ignores_comments_blank() {
+    reset; printf '# note\n\n' > "$FAKE/etc/roost/adopt/milliways"
+    apply milliways milliways
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+}
+
+# ---- go / backend-only app ---------------------------------------------------
+case_env_directive_unit_validates() {
+    reset
+    grep -q '^Environment=SCRUPLES_ADDR=127.0.0.1:8003$' "$TEST_HOME/staged/scruples/scruples-api.service" \
+        || { echo "staged unit lacks Environment line" >&2; exit 1; }
+    apply scruples scruples
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "unit installed" grep -q '^Environment=SCRUPLES_ADDR=127.0.0.1:8003$' "$FAKE/etc/systemd/system/scruples-api.service"
+}
+
+case_backend_only_nginx_validates() {
+    reset; apply scruples scruples
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "root proxy" grep -q 'proxy_pass http://127.0.0.1:8003;' "$FAKE/etc/nginx/sites-available/scruples"
+    need "no api location" bash -c "! grep -q 'location /api/' '$FAKE/etc/nginx/sites-available/scruples'"
+    need "no www synced" test ! -e "$FAKE/var/www/scruples"
+}
+
+case_rejects_env_directive_injection() {
+    reset; perl -pi -e '$_ .= "ExecStartPost=/bin/id\n" if /^Environment=/' "$TEST_HOME/staged/scruples/scruples-api.service"
+    apply scruples scruples
+    need "fails" fails; need "not allowed" said "not allowed"
+    need "no systemctl calls" bash -c "! grep -q '^systemctl' '$LOG'"
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^case_'); do

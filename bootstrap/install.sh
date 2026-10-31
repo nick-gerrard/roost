@@ -24,15 +24,22 @@ if [[ ! -e /swapfile ]]; then
 fi
 swapon --show
 
-echo "==> /etc/roost + adoption markers for the two existing apps"
+echo "==> /etc/roost + adoption markers for apps that predate roost"
 install -d -m 0755 /etc/roost /etc/roost/adopt
 install -m 0644 $SRC/roost.conf /etc/roost/roost.conf
-# One-shot permission for roost to take over the existing hand-written units/sites.
-# Cleared automatically after each app's first successful roost deploy.
-for app in milliways pwhl; do
-    head -n1 /etc/systemd/system/$app-api.service 2>/dev/null | grep -qx '# roost-managed' \
-        || touch /etc/roost/adopt/$app
-done
+# One-shot permission for roost to take over existing hand-written units/sites, written
+# only while the app's legacy files are still present. Cleared automatically after the
+# app's first successful roost deploy. Lines name legacy files to retire (see roost-apply).
+adopt() {   # adopt <app> <legacy-unit-to-detect> [marker lines...]
+    local app=$1 detect=$2; shift 2
+    [[ -e /etc/systemd/system/$detect ]] || return 0
+    head -n1 /etc/systemd/system/$detect | grep -qx '# roost-managed' && return 0
+    printf '%s\n' "$@" > /etc/roost/adopt/$app
+    echo "   adopt marker for $app"
+}
+adopt milliways milliways-api.service
+adopt pwhl pwhl-api.service
+adopt ducksbucks ducksbucks.service "unit ducksbucks.service" "site ducksbucks.nickgerrard.dev"
 
 echo "==> roost-apply + sudoers"
 install -m 0755 -o root -g root $SRC/roost-apply /usr/local/sbin/roost-apply

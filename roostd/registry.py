@@ -26,6 +26,7 @@ class AppRecord:
     on: str = "push"
     backend_port: int | None = None
     frontend_port: int | None = None
+    dir: str | None = None        # checkout dir under APPS_ROOT when it isn't the repo name
 
 
 def _port_free(port: int) -> bool:

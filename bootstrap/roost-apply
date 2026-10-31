@@ -40,6 +40,43 @@ ADOPT="$ROOT/etc/roost/adopt/$NAME"
 
 die() { echo "roost-apply: $*" >&2; exit 1; }
 
+# The adopt marker may list legacy files to retire on takeover, one per line:
+#   unit ducksbucks.service            (stopped, disabled, removed; restored if the new unit fails)
+#   site ducksbucks.nickgerrard.dev    (sites-enabled/sites-available file removed)
+# It lives in root-owned /etc/roost/adopt, so its contents are trusted.
+legacy_units=(); legacy_sites=(); retired_units=(); retired_sites=()
+if [[ -f "$ADOPT" ]]; then
+    while read -r kind val rest || [[ -n "$kind" ]]; do
+        [[ -z "$kind" || "$kind" == \#* ]] && continue
+        [[ -z "$rest" ]] || die "adopt: bad line '$kind $val $rest'"
+        case "$kind" in
+            unit) [[ "$val" =~ ^[A-Za-z0-9@._-]+\.service$ ]] || die "adopt: bad unit '$val'"; legacy_units+=("$val") ;;
+            site) [[ "$val" =~ ^[A-Za-z0-9._-]+$ && "$val" != "$NAME" ]] || die "adopt: bad site '$val'"; legacy_sites+=("$val") ;;
+            *) die "adopt: unknown entry '$kind'" ;;
+        esac
+    done < "$ADOPT"
+fi
+
+is_legacy_site() {
+    local s
+    for s in "${legacy_sites[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+    return 1
+}
+
+restore_legacy() {
+    local u s
+    for u in "${retired_units[@]}"; do
+        cp -a "$BACKUP/$u" "$SYSTEMD/$u" && echo "restoring legacy $u" >&2
+    done
+    if (( ${#retired_units[@]} )); then
+        systemctl daemon-reload
+        for u in "${retired_units[@]}"; do systemctl enable -q --now "$u" || true; done
+    fi
+    for s in "${retired_sites[@]}"; do
+        cp -a "$BACKUP/$s" "$AVAIL/$s" && ln -sfn "$AVAIL/$s" "$ENABLED/$s" && echo "restoring legacy site $s" >&2
+    done
+}
+
 # Refuse to clobber a file roost didn't write, unless root has marked the app adoptable.
 check_owned() {
     local target="$1"
@@ -115,6 +152,7 @@ nginx_reload() {
     if ! nginx -t 2>&1; then
         echo "nginx -t failed; restoring previous config" >&2
         if [[ -e "$BACKUP/$NAME" ]]; then cp -a "$BACKUP/$NAME" "$AVAIL/$NAME"; else rm -f "$ENABLED/$NAME" "$AVAIL/$NAME"; fi
+        restore_legacy
         nginx -t && systemctl reload nginx
         die "nginx config rejected"
     fi
@@ -147,6 +185,7 @@ if [[ -n "$FQDN" ]]; then
     # no *other* enabled site may already claim this hostname
     for other in "$ENABLED"/*; do
         [[ "$(basename "$other")" == "$NAME" ]] && continue
+        is_legacy_site "$(basename "$other")" && continue
         grep -qE "^\s*server_name\s+([^;]*\s)?${FQDN//./\\.}(\s|;)" "$other" 2>/dev/null \
             && die "$FQDN is already served by $(basename "$other")"
     done
@@ -160,6 +199,15 @@ if [[ -d "$STAGED/www" ]]; then
     echo "synced static files to $WWW"
 fi
 
+for u in "${legacy_units[@]}"; do
+    [[ -e "$SYSTEMD/$u" ]] || continue
+    backup "$SYSTEMD/$u"
+    systemctl disable -q --now "$u" || true
+    rm -f "$SYSTEMD/$u"
+    retired_units+=("$u")
+    echo "retired legacy $u"
+done
+
 for base in "${units[@]}"; do
     backup "$SYSTEMD/$base"
     install -m 0644 "$STAGED/$base" "$SYSTEMD/$base"
@@ -171,10 +219,18 @@ if (( ${#units[@]} )); then
         systemctl enable -q "$svc"
         systemctl restart "$svc"
         sleep 1
-        systemctl is-active -q "$svc" || { journalctl -u "$svc" -n 30 --no-pager >&2; die "$svc failed to start"; }
+        systemctl is-active -q "$svc" || { journalctl -u "$svc" -n 30 --no-pager >&2; restore_legacy; die "$svc failed to start"; }
         echo "restarted $svc"
     done
 fi
+
+for s in "${legacy_sites[@]}"; do
+    [[ -e "$AVAIL/$s" || -L "$ENABLED/$s" ]] || continue
+    backup "$AVAIL/$s"
+    rm -f "$ENABLED/$s" "$AVAIL/$s"
+    retired_sites+=("$s")
+    echo "retired legacy site $s"
+done
 
 if [[ -n "$FQDN" ]]; then
     cert="$ROOT/etc/letsencrypt/live/$FQDN/fullchain.pem"

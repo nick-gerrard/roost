@@ -7,7 +7,10 @@ After=network.target postgresql.service
 User={{ user }}
 WorkingDirectory={{ app_dir }}/{{ backend.workdir }}
 EnvironmentFile=-{{ env_file }}
-ExecStart={{ venv_bin }}/{{ start }}
+{% for k, v in env.items() %}
+Environment={{ k }}={{ v }}
+{% endfor %}
+ExecStart={{ exec_dir }}/{{ start }}
 Restart=always
 RestartSec=5
 

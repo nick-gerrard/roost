@@ -71,3 +71,64 @@ def test_needs_a_component():
 def test_bad_frontend_kind():
     with pytest.raises(ValueError, match="kind"):
         Manifest.parse('name = "a"\nsubdomain = "a"\n[frontend]\nkind = "spa"\n')
+
+
+GO_BE = '[backend]\nruntime = "go"\nbuild = "go build -o app ."\nstart = "app"\n'
+
+
+def test_go_runtime_parses():
+    m = Manifest.parse('name = "a"\n' + GO_BE + '[backend.env]\nADDR = "127.0.0.1:{port}"\n')
+    assert m.backend.runtime == "go" and m.backend.build == "go build -o app ."
+    assert m.backend.env == {"ADDR": "127.0.0.1:{port}"}
+
+
+def test_go_needs_build():
+    with pytest.raises(ValueError, match="build"):
+        Manifest.parse('name = "a"\n[backend]\nruntime = "go"\nstart = "app --port {port}"\n')
+
+
+def test_unknown_runtime():
+    with pytest.raises(ValueError, match="runtime"):
+        Manifest.parse('name = "a"\n[backend]\nruntime = "ruby"\nstart = "x {port}"\n')
+
+
+def test_python_build_optional_and_parsed():
+    m = Manifest.parse('name = "a"\n[backend]\nstart = "x {port}"\nbuild = "npm ci && npm run build:css"\n')
+    assert m.backend.runtime == "python-uv" and m.backend.build == "npm ci && npm run build:css"
+
+
+@pytest.mark.parametrize("key", ["lower", "1ABC", "A-B", "A B"])
+def test_env_bad_key(key):
+    with pytest.raises(ValueError, match="backend.env"):
+        Manifest.parse(f'name = "a"\n' + GOOD_BE + f'[backend.env]\n"{key}" = "v"\n')
+
+
+@pytest.mark.parametrize("val", ['a\\nb', 'a\\"b', 'a\\\\b', 'a%b', 'a\\rb'])
+def test_env_bad_value(val):
+    with pytest.raises(ValueError, match="backend.env"):
+        Manifest.parse('name = "a"\n' + GOOD_BE + f'[backend.env]\nK = "{val}"\n')
+
+
+def test_env_non_string_value():
+    with pytest.raises(ValueError, match="backend.env"):
+        Manifest.parse('name = "a"\n' + GOOD_BE + '[backend.env]\nK = 5\n')
+
+
+def test_env_not_a_table():
+    with pytest.raises(ValueError, match="table"):
+        Manifest.parse('name = "a"\n[backend]\nstart = "x {port}"\nenv = "K=V"\n')
+
+
+def test_env_good_keys():
+    m = Manifest.parse('name = "a"\n' + GOOD_BE + '[backend.env]\n_X1 = "v"\nSCRUPLES_ADDR = "a b"\n')
+    assert set(m.backend.env) == {"_X1", "SCRUPLES_ADDR"}
+
+
+def test_port_in_env_only_ok():
+    m = Manifest.parse('name = "a"\n[backend]\nstart = "app"\n[backend.env]\nADDR = ":{port}"\n')
+    assert m.backend.start == "app"
+
+
+def test_port_nowhere_rejected():
+    with pytest.raises(ValueError, match="port"):
+        Manifest.parse('name = "a"\n[backend]\nstart = "app"\n[backend.env]\nADDR = ":80"\n')

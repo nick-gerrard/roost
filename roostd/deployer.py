@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
@@ -84,6 +85,11 @@ class Deployer:
         suffix = f".{kind}" if kind else ""
         return ROOST_HOME / "env" / f"{name}{suffix}.env"
 
+    def app_dir(self, repo_name: str) -> Path:
+        """Checkout dir: the registry's `dir` override (for checkouts that predate roost), else the repo name."""
+        rec = self.registry.by_repo(repo_name)
+        return APPS_ROOT / (rec.dir if rec and rec.dir else repo_name)
+
     def deploy(self, repo_name: str, repo_url: str, ref: str, trigger: str,
                log: Logger) -> AppRecord | None:
         with self._locks[repo_name]:
@@ -95,7 +101,7 @@ class Deployer:
 
     def _deploy(self, repo_name: str, repo_url: str, ref: str, trigger: str,
                 log: Logger) -> AppRecord:
-        app_dir = APPS_ROOT / repo_name
+        app_dir = self.app_dir(repo_name)
         self._fetch(repo_url, ref, app_dir, log)
 
         # Read the manifest from the fetched commit *before* touching the
@@ -142,6 +148,8 @@ class Deployer:
 
     def _fetch(self, repo_url: str, ref: str, app_dir: Path, log: Logger) -> None:
         if (app_dir / ".git").exists():
+            # keep origin pointed at the canonical URL (repos get renamed)
+            _run(f"git remote set-url origin {shlex.quote(repo_url)}", app_dir, log)
             _run(f"git fetch -q --prune origin {shlex.quote(ref)}", app_dir, log)
         else:
             app_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -150,15 +158,21 @@ class Deployer:
 
     def _build_backend(self, m: Manifest, app_dir: Path, log: Logger) -> None:
         be = m.backend
-        if be.runtime != "python-uv":
-            raise DeployError(f"unsupported backend runtime {be.runtime!r}")
-        _run("uv sync", app_dir / be.project, log)
+        project, workdir = app_dir / be.project, app_dir / be.workdir
         app_env = load_env_file(self.env_path(m.name))
-        workdir = app_dir / be.workdir
+        if be.runtime == "python-uv":
+            _run("uv sync", project, log)
+            prefix = "uv run "
+        elif be.runtime == "go":
+            prefix = ""
+        else:
+            raise DeployError(f"unsupported backend runtime {be.runtime!r}")
+        if be.build:
+            _run(be.build, project, log, env=app_env)
         if m.on == "push" and be.test:
-            _run(f"uv run {be.test}", workdir, log, env=app_env)
+            _run(f"{prefix}{be.test}", workdir, log, env=app_env)
         if be.migrate:
-            _run(f"uv run {be.migrate}", workdir, log, env=app_env)
+            _run(f"{prefix}{be.migrate}", workdir, log, env=app_env)
 
     def _build_frontend(self, m: Manifest, app_dir: Path, rec: AppRecord, log: Logger) -> None:
         fe = m.frontend
@@ -184,8 +198,11 @@ class Deployer:
             frontend_env_file=str(self.env_path(m.name, "frontend")),
         )
         if m.backend:
-            ctx["start"] = m.backend.start.format(port=rec.backend_port)
-            ctx["venv_bin"] = posixpath.normpath(f"{app_dir}/{m.backend.project}/.venv/bin")
+            port = str(rec.backend_port)
+            ctx["start"] = m.backend.start.replace("{port}", port)
+            ctx["env"] = {k: v.replace("{port}", port) for k, v in m.backend.env.items()}
+            bin_dir = ".venv/bin" if m.backend.runtime == "python-uv" else "."
+            ctx["exec_dir"] = posixpath.normpath(f"{app_dir}/{m.backend.project}/{bin_dir}")
             self._render("backend.service.j2", staged / f"{m.name}-api.service", ctx)
         if m.frontend and m.frontend.kind == "node":
             self._render("frontend.service.j2", staged / f"{m.name}-frontend.service", ctx)
@@ -208,6 +225,11 @@ class Deployer:
                 with urllib.request.urlopen(url, timeout=3) as r:
                     log(f"health ok: {url} -> {r.status}")
                     return
+            except urllib.error.HTTPError as e:  # it answered; only 5xx counts as unhealthy
+                if e.code < 500:
+                    log(f"health ok: {url} -> {e.code}")
+                    return
+                last = e
             except Exception as e:  # noqa: BLE001 — retry on anything until timeout
                 last = e
             time.sleep(1)
