@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}roost · sign in{% endblock %}
+{% block body %}
+<div style="max-width:360px;margin:12vh auto 0">
+  <div class="brand" style="font-size:24px;margin-bottom:6px">🪺 roost</div>
+  <p style="color:var(--muted);margin:0 0 20px">Deploys for {{ domain }}</p>
+  <form method="post" action="/login" class="card">
+    <label for="pw" style="font-size:13px;color:var(--muted)">Secret</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required
+           style="display:block;width:100%;margin:6px 0 14px;font:inherit;padding:8px 10px;border-radius:8px;
+                  border:1px solid var(--line);background:var(--bg);color:var(--ink)">
+    {% if error %}<div class="err" style="margin:-6px 0 12px">That's not it.</div>{% endif %}
+    <button class="primary" style="width:100%;padding:8px">Sign in</button>
+  </form>
+  <p style="color:var(--muted);font-size:12.5px;margin-top:14px">
+    It's <code>ROOST_SECRET</code> in <code>~/.config/roost/config</code>.
+  </p>
+</div>
+{% endblock %}

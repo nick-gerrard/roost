@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block body %}
+<header>
+  <a class="brand" href="/">🪺 roost<small>{{ domain }}</small></a>
+  <form method="post" action="/logout"><button>Sign out</button></form>
+</header>
+
+<h2>Apps</h2>
+<div class="grid">
+{% for a in apps %}
+  <div class="card">
+    <div class="card-head">
+      <span class="name">{{ a.rec.name }}</span>
+      <span class="pill neutral">{{ "after CI" if a.rec.on == "ci-pass" else "on push" }}</span>
+    </div>
+    {% if a.url %}<a class="url" href="{{ a.url }}" target="_blank" rel="noopener">{{ a.url.removeprefix("https://") }} ↗</a>{% endif %}
+    <div class="meta">
+      <a href="https://github.com/nick-gerrard/{{ a.rec.repo_name }}" target="_blank" rel="noopener">{{ a.rec.repo_name }}</a>
+      {% if a.rec.backend_port %}<span>api :{{ a.rec.backend_port }}</span>{% endif %}
+      {% if a.rec.frontend_port %}<span>web :{{ a.rec.frontend_port }}</span>{% endif %}
+    </div>
+    <div class="units">
+      {% for unit, state in a.units.items() %}
+        <span class="pill {{ 'ok' if state == 'active' else 'bad' }}">{{ unit }} · {{ state }}</span>
+      {% endfor %}
+    </div>
+    <div class="last">
+      <div>
+        {% if a.running %}
+          <span class="pill running">deploying…</span>
+          <span class="detail">{{ a.last.trigger }} · {{ a.ago }}</span>
+        {% elif a.last %}
+          <span class="pill {{ a.last.result }}">{{ a.last.result }}</span>
+          <span class="detail">{{ a.ago }}{% if a.last.commit %} · <code>{{ a.last.commit }}</code>{% endif %}</span>
+        {% else %}
+          <span class="detail">never deployed by roost</span>
+        {% endif %}
+      </div>
+      <div class="actions">
+        <a class="btn" href="/ui/logs/{{ a.rec.name }}">Logs</a>
+        <form method="post" action="/ui/deploy/{{ a.rec.name }}"
+              onsubmit="return confirm('Deploy {{ a.rec.name }} from main now?')">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="primary" {% if a.running %}disabled{% endif %}>Deploy</button>
+        </form>
+      </div>
+    </div>
+    {% if a.last and a.last.error and not a.running %}<div class="err">{{ a.last.error }}</div>{% endif %}
+  </div>
+{% else %}
+  <div class="card" style="color:var(--muted)">No apps yet. Add a <code>deploy.toml</code> and push.</div>
+{% endfor %}
+</div>
+
+<h2>Recent deploys</h2>
+{% if recent %}
+<div class="table-wrap">
+<table>
+  <tr><th>Repo</th><th>Result</th><th class="hide-sm">Trigger</th><th class="hide-sm">Ref</th><th>When</th><th class="hide-sm">Took</th></tr>
+  {% for e in recent %}
+  <tr>
+    <td>{{ e.repo }}{% if e.commit %} <code style="color:var(--muted)">{{ e.commit }}</code>{% endif %}</td>
+    <td><span class="pill {{ e.result }}">{{ e.result }}</span></td>
+    <td class="hide-sm">{{ e.trigger }}</td>
+    <td class="hide-sm"><code>{{ e.ref }}</code></td>
+    <td class="num" title="{{ e.started }}">{{ e.ago }}</td>
+    <td class="num hide-sm">{{ e.duration }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<div class="card" style="color:var(--muted)">No deploys recorded yet.</div>
+{% endif %}
+
+{% if others %}
+<h2>Other sites on this box</h2>
+<div class="others">
+  {% for n in others %}<a class="pill neutral" href="https://{{ n }}" target="_blank" rel="noopener" style="text-decoration:none">{{ n }}</a>{% endfor %}
+</div>
+<p style="color:var(--muted);font-size:12.5px">Not managed by roost yet. Add a <code>deploy.toml</code> to migrate one.</p>
+{% endif %}
+{% endblock %}

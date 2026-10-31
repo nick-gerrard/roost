@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}roost · {{ rec.name }} logs{% endblock %}
+{% block body %}
+<header>
+  <a class="brand" href="/">🪺 roost<small>{{ rec.name }} · deploy log</small></a>
+  <div class="actions">
+    {% if running %}<span class="pill running">deploying…</span>{% endif %}
+    <a class="btn" href="/ui/logs/{{ rec.name }}?lines={{ 2000 if lines < 2000 else 300 }}">{{ "Show more" if lines < 2000 else "Show less" }}</a>
+    <a class="btn" href="/">Back</a>
+  </div>
+</header>
+{% if log %}
+<pre class="log" id="log">{{ log }}</pre>
+<script>window.scrollTo(0, document.body.scrollHeight);</script>
+{% if running %}<script>setTimeout(() => location.reload(), 3000);</script>{% endif %}
+{% else %}
+<div class="card" style="color:var(--muted)">No log yet.</div>
+{% endif %}
+{% endblock %}

@@ -11,11 +11,13 @@ import hmac
 import json
 import os
 import re
+import subprocess
 from datetime import datetime
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 
-from .deployer import ROOST_HOME, Deployer
+from . import history as hist
+from .deployer import APPS_ROOT, ROOST_HOME, Deployer
 from .manifest import NAME_RE
 from .registry import Registry
 
@@ -30,6 +32,7 @@ REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
 app = FastAPI(title="roostd")
 registry = Registry(ROOST_HOME / "registry.json", reserved=RESERVED_PORTS)
 deployer = Deployer(registry)
+history = hist.History(ROOST_HOME / "history.jsonl")
 
 
 def _logger(repo_name: str):
@@ -40,13 +43,31 @@ def _logger(repo_name: str):
     return log
 
 
+def _commit(repo_name: str) -> str | None:
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=APPS_ROOT / repo_name,
+                              capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _run_deploy(repo_name: str, repo_url: str, ref: str, trigger: str) -> None:
     log = _logger(repo_name)
     log(f"=== {datetime.now():%Y-%m-%d} deploy {repo_name}@{ref} (trigger={trigger}) ===")
+    entry = {"repo": repo_name, "ref": ref, "trigger": trigger, "started": hist.now()}
+    hist.running[repo_name] = entry
     try:
-        deployer.deploy(repo_name, repo_url, ref, trigger, log)
+        rec = deployer.deploy(repo_name, repo_url, ref, trigger, log)
+        entry["result"] = "ok" if rec else "skipped"
+        if rec:
+            entry.update(app=rec.name, commit=_commit(repo_name))
     except Exception as e:  # noqa: BLE001 — log every failure, never crash the daemon
         log(f"❌ DEPLOY FAILED: {e}")
+        entry.update(result="failed", error=str(e)[:300])
+    finally:
+        entry["finished"] = hist.now()
+        hist.running.pop(repo_name, None)
+        history.append(entry)
 
 
 def _verify_bearer(authorization: str | None) -> None:
@@ -148,3 +169,10 @@ async def push_env(name: str, request: Request, kind: str = "",
     path.write_text(body)
     keys = [l.split("=", 1)[0] for l in body.splitlines() if "=" in l and not l.startswith("#")]
     return {"wrote": str(path), "keys": keys, "note": "redeploy to apply"}
+
+
+history.backfill_from_logs(LOG_DIR)
+
+from .dashboard import router as dashboard_router  # noqa: E402 — needs the globals above
+
+app.include_router(dashboard_router)
