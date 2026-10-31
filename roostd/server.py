@@ -149,9 +149,16 @@ def manual_deploy(name: str, background: BackgroundTasks, ref: str = "main",
     _verify_bearer(authorization)
     if not REF_RE.match(ref):
         raise HTTPException(400, "bad ref")
-    rec = _lookup(name)
-    background.add_task(_run_deploy, rec.repo_name, rec.repo_url, ref, "manual")
-    return {"queued": rec.name, "ref": ref}
+    rec = registry.get(name) or registry.by_repo(name)
+    if rec:
+        background.add_task(_run_deploy, rec.repo_name, rec.repo_url, ref, "manual")
+        return {"queued": rec.name, "ref": ref}
+    # Not registered yet: treat `name` as a repo under OWNER (first deploy of a new app).
+    if not REPO_RE.match(name):
+        raise HTTPException(400, "bad name")
+    url = f"https://github.com/{OWNER}/{name}.git"
+    background.add_task(_run_deploy, name, url, ref, "manual")
+    return {"queued": name, "ref": ref, "new": True}
 
 
 @app.post("/env/{name}")

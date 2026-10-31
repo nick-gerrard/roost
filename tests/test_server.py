@@ -154,10 +154,17 @@ def test_manual_deploy(srv):
                         on="push", need_backend=True, need_frontend=False)
     assert srv.client.post("/deploy/pwhl").status_code == 401
     assert srv.client.post("/deploy/pwhl?ref=-bad", headers=AUTH).status_code == 400
-    assert srv.client.post("/deploy/nope", headers=AUTH).status_code == 404
     r = srv.client.post("/deploy/pwhl?ref=dev", headers=AUTH)
     assert r.json() == {"queued": "pwhl", "ref": "dev"}
     assert srv.queued == [("pwhl", "u", "dev", "manual")]
+
+
+def test_manual_deploy_of_unregistered_repo_uses_owner(srv):
+    # first deploy of a new app: the name is taken as a repo under ROOST_GITHUB_OWNER
+    r = srv.client.post("/deploy/new-app", headers=AUTH)
+    assert r.json() == {"queued": "new-app", "ref": "main", "new": True}
+    assert srv.queued == [("new-app", "https://github.com/nick-gerrard/new-app.git", "main", "manual")]
+    assert srv.client.post("/deploy/bad%20name", headers=AUTH).status_code == 400
 
 
 def test_logs(srv):

@@ -142,6 +142,22 @@ validate_nginx() {
     fi
 }
 
+# A service that crashes during startup sits in "activating" between Restart= attempts,
+# so one early is-active check passes. Watch it for START_WAIT seconds: any automatic
+# restart, or a failed/inactive state, means it didn't come up.
+START_WAIT="${ROOST_TEST_START_WAIT:-10}"   # tests shorten it; sudo strips env in production
+started_ok() {
+    local svc="$1" before i sub
+    before="$(systemctl show -p NRestarts --value "$svc")"
+    for ((i = 0; i < START_WAIT; i++)); do
+        sleep 1
+        sub="$(systemctl show -p SubState --value "$svc")"
+        [[ "$sub" == auto-restart || "$sub" == failed || "$sub" == dead ]] && return 1
+        [[ "$(systemctl show -p NRestarts --value "$svc")" == "$before" ]] || return 1
+    done
+    systemctl is-active -q "$svc"
+}
+
 backup() {
     local src="$1"
     [[ -e "$src" ]] || return 0
@@ -218,8 +234,7 @@ if (( ${#units[@]} )); then
         svc="${base%.service}"
         systemctl enable -q "$svc"
         systemctl restart "$svc"
-        sleep 1
-        systemctl is-active -q "$svc" || { journalctl -u "$svc" -n 30 --no-pager >&2; restore_legacy; die "$svc failed to start"; }
+        started_ok "$svc" || { journalctl -u "$svc" -n 30 --no-pager >&2; restore_legacy; die "$svc failed to start"; }
         echo "restarted $svc"
     done
 fi

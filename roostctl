@@ -17,7 +17,7 @@ roostctl <command>
 
   login [ssh-host]              fetch the secret from the server into $CONF
   status                        list registered apps + ports
-  deploy <app> [ref]            deploy now (default ref: main)
+  deploy <app|repo> [ref]       deploy now (default ref: main); a repo name works for a first deploy
   logs <app> [lines]            tail the deploy log
   env push <app> <file> [kind]  upload env vars; kind: runtime (default) | frontend | build
   webhook <repo> [push|ci-pass] add the GitHub webhook (needs gh auth)
@@ -61,19 +61,26 @@ case "$cmd" in
       -f config[content_type]=json -f "config[secret]=$ROOST_SECRET" --jq '"hook \(.id) -> \(.config.url) [\(.events|join(","))]"' ;;
   init)
     cat <<'EOF'
-# deploy.toml — see https://github.com/nick-gerrard/roost#deploytoml
-name = "myapp"            # service names: myapp-api / myapp-frontend
-subdomain = "myapp"       # -> https://myapp.nickgerrard.dev  (omit for a worker)
-on = "push"               # or "ci-pass" to deploy only after GitHub Actions passes
+# deploy.toml — reference: https://github.com/nick-gerrard/roost#deploytoml
+name = "myapp"            # units myapp-api / myapp-frontend; must be unique on the box
+subdomain = "myapp"       # -> https://myapp.nickgerrard.dev  (omit for a background worker)
+on = "push"               # or "ci-pass": deploy only after GitHub Actions passes on main
 
-[backend]                 # python + uv; nginx proxies /api/* here (prefix stripped)
-workdir = "backend"
+[backend]                 # bind 127.0.0.1:{port}; roost picks the port
+runtime = "python-uv"     # or "go" (then `build` is required)
+workdir = "backend"       # WorkingDirectory ("." for root-level apps)
+# project = "."           # where uv sync runs / .venv lives (default: workdir)
 start = "uvicorn main:app --host 127.0.0.1 --port {port}"
+# build = "npm ci && npm run build:css"     # go: "/snap/go/current/bin/go build -o myapp ."
 migrate = "alembic upgrade head"
-health = "/health"
+health = "/health"        # any non-5xx answer counts
 
-[frontend]                # SvelteKit; built on the server with PUBLIC_API_URL=https://<sub>.nickgerrard.dev/api
-kind = "static"           # or "node" for adapter-node
+# [backend.env]           # non-secret env; secrets: roostctl env push myapp prod.env
+# PORT = "{port}"
+
+[frontend]                # omit for server-rendered/API-only apps (then / goes to the backend)
+kind = "static"           # SvelteKit adapter-static; or "node" for adapter-node
+# fallback = "/404.html"  # static SPA fallback page (SvelteKit `fallback: '404.html'`)
 EOF
     ;;
   *) usage; exit 1 ;;

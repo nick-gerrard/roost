@@ -8,7 +8,18 @@ FQDN=milliways.nickgerrard.dev
 mkdir -p "$STUBS"
 
 stub() { printf '#!/bin/bash\n%s\n' "$2" > "$STUBS/$1"; chmod +x "$STUBS/$1"; }
-stub systemctl 'echo "systemctl $*" >> '"$LOG"'; [[ "$1" == is-active && -e '"$W"'/active_fail ]] && exit 3; exit 0'
+# `show -p PROP --value UNIT` answers from $W/seq_PROP_UNIT (space-separated values, one per call,
+# last repeats); default NRestarts=0, SubState=running. Calls are counted in $W/cnt_PROP_UNIT.
+stub systemctl 'echo "systemctl $*" >> '"$LOG"'
+if [[ "$1" == show && "$2" == -p && "$4" == --value ]]; then
+    prop="$3"; unit="$5"
+    c="'"$W"'/cnt_${prop}_${unit}"; n=$(( $(cat "$c" 2>/dev/null || echo 0) + 1 )); echo $n > "$c"
+    seq="'"$W"'/seq_${prop}_${unit}"
+    if [[ -e "$seq" ]]; then read -ra v < "$seq"; i=$((n-1)); (( i >= ${#v[@]} )) && i=$((${#v[@]}-1)); echo "${v[$i]}"; exit 0; fi
+    [[ "$prop" == NRestarts ]] && echo 0 || echo running
+    exit 0
+fi
+[[ "$1" == is-active && -e '"$W"'/active_fail ]] && exit 3; exit 0'
 stub journalctl 'echo "journalctl $*" >> '"$LOG"'; exit 0'
 stub openssl 'echo "openssl $*" >> '"$LOG"'; exit 0'
 stub nginx 'echo "nginx $*" >> '"$LOG"'; [[ "$1" == -t && -e '"$W"'/nginx_fail ]] && exit 1; exit 0'
@@ -20,9 +31,10 @@ stub rsync 'echo "rsync $*" >> '"$LOG"'
 src="${@: -2:1}"; dst="${@: -1}"; find "$dst" -mindepth 1 -delete; cp -R "$src". "$dst"'
 [[ "${NATIVE:-}" == 1 ]] && stub chown 'exit 0'
 export PATH="$STUBS:$PATH"
+export ROOST_TEST_START_WAIT=3
 
 reset() {
-    rm -rf "${FAKE:?}" "${TEST_HOME:?}"; : > "$LOG"; rm -f "$W/nginx_fail" "$W/active_fail"
+    rm -rf "${FAKE:?}" "${TEST_HOME:?}"; : > "$LOG"; rm -f "$W/nginx_fail" "$W/active_fail" "$W"/seq_* "$W"/cnt_*
     mkdir -p "$FAKE"/etc/{roost/adopt,systemd/system,nginx/sites-available,nginx/sites-enabled,letsencrypt/live} \
         "$FAKE/var/www" "$TEST_HOME"
     printf 'ROOST_USER=%s\nROOST_HOME=%s\nAPPS_ROOT=%s\nDOMAIN=nickgerrard.dev\n' \
@@ -250,6 +262,35 @@ case_adopt_rollback_when_new_unit_fails() {
     need "legacy unit re-enabled" logged "systemctl enable -q --now legacy.service"
     need "marker kept" test -e "$FAKE/etc/roost/adopt/milliways"
     need "legacy site untouched" test -f "$LEGACY_SITE" -a -L "$FAKE/etc/nginx/sites-enabled/legacy.example-site"
+}
+
+case_adopt_rollback_when_service_crash_loops() {
+    legacy_setup; echo "running auto-restart" > "$W/seq_SubState_milliways-api"
+    apply milliways milliways
+    need "exit non-zero" fails; need "says failed to start" said "failed to start"
+    need "restoring message" said "restoring legacy legacy.service"
+    need "legacy unit restored" grep -q 'ExecStart=/usr/bin/legacy' "$LEGACY_UNIT"
+    need "legacy unit re-enabled" logged "systemctl enable -q --now legacy.service"
+    need "marker kept" test -e "$FAKE/etc/roost/adopt/milliways"
+}
+
+case_adopt_rollback_when_nrestarts_increments() {
+    legacy_setup; echo "0 0 1" > "$W/seq_NRestarts_milliways-api"
+    apply milliways milliways
+    need "exit non-zero" fails; need "says failed to start" said "failed to start"
+    need "legacy unit restored" grep -q 'ExecStart=/usr/bin/legacy' "$LEGACY_UNIT"
+    need "legacy unit re-enabled" logged "systemctl enable -q --now legacy.service"
+    need "marker kept" test -e "$FAKE/etc/roost/adopt/milliways"
+}
+
+case_healthy_service_is_polled_and_passes() {
+    legacy_setup; echo "running running running" > "$W/seq_SubState_milliways-api"
+    apply milliways milliways
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "substate polled" logged "systemctl show -p SubState --value milliways-api"
+    need "polled START_WAIT times" test "$(cat "$W/cnt_SubState_milliways-api")" -eq 3
+    need "nrestarts recorded" logged "systemctl show -p NRestarts --value milliways-api"
+    need "marker removed" test ! -e "$FAKE/etc/roost/adopt/milliways"
 }
 
 case_adopt_rollback_when_nginx_rejects() {
