@@ -301,3 +301,19 @@ def test_health_connection_refused_fails(env, monkeypatch):
         port = s.getsockname()[1]
     with pytest.raises(dmod.DeployError):
         env.dep._health(port, "/", lambda _: None, tries=2)
+
+
+@pytest.mark.parametrize("tag", ["main", "origin/main"])
+def test_tag_shadowing_branch_is_never_deployed(env, tag):
+    """A collaborator who can push tags must not be able to deploy code that isn't on main."""
+    seed(env)
+    env.deploy()  # first deploy: clone
+    commit(env.work, "good", {"backend/main.py": "x='good'\n"})
+    sh("git", "checkout", "-q", "-b", "evil", cwd=env.work)
+    (env.work / "backend" / "main.py").write_text("x='evil'\n")
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "evil", cwd=env.work)
+    sh("git", "tag", tag, cwd=env.work)
+    sh("git", "push", "-q", "origin", f"refs/tags/{tag}", cwd=env.work)
+    sh("git", "checkout", "-q", "main", cwd=env.work)
+    env.deploy()  # second deploy: fetch into the existing checkout
+    assert (env.apps / "pwhl" / "backend" / "main.py").read_text() == "x='good'\n"
