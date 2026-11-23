@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import REPO, stage, stage_go
+from conftest import REPO, stage, stage_go, stage_worker
 
 DOCKER = shutil.which("docker") or "/opt/homebrew/bin/docker"
 CASES = Path(__file__).with_name("apply_cases.sh")
@@ -41,6 +41,11 @@ def _prepare(dirs, work: Path, home_target: str, apps_target: str):
     staged, _, _ = stage_go(dirs)
     shutil.copytree(staged, out / "scruples")
     for f in (out / "scruples").iterdir():
+        f.write_text(f.read_text().replace(str(home), home_target).replace(str(apps), apps_target))
+    # sandboxed background worker (DynamicUser, no subdomain)
+    staged, _, _ = stage_worker(dirs)
+    shutil.copytree(staged, out / "ducksy")
+    for f in (out / "ducksy").iterdir():
         f.write_text(f.read_text().replace(str(home), home_target).replace(str(apps), apps_target))
 
 

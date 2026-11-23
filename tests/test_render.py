@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from conftest import GO_MANIFEST, stage, stage_go
+from conftest import GO_MANIFEST, stage, stage_go, stage_worker
 
 
 @pytest.fixture
@@ -125,3 +125,22 @@ def test_frontend_apps_keep_api_location(milliways):
     staged, _ = milliways
     text = (staged / "milliways.nginx.conf").read_text()
     assert "location /api/" in text and "proxy_pass http://127.0.0.1:3002;" in text
+
+
+def test_sandboxed_worker_unit(dirs):
+    staged, app, _ = stage_worker(dirs)
+    text = (staged / "ducksy-api.service").read_text()
+    assert "DynamicUser=yes\n" in text
+    assert "User=" not in text.replace("DynamicUser=", "")
+    assert "StateDirectory=ducksy\n" in text
+    apps = str(dirs[1])
+    assert f"BindReadOnlyPaths={app} -{apps}/.local/share/uv/python\n" in text
+    assert "ProtectHome=tmpfs\n" in text and "IPAddressDeny=localhost\n" in text
+    assert f"ExecStart={app}/.venv/bin/python -m ducksy\n" in text
+    assert not any(p.name.endswith(".conf") for p in staged.iterdir())
+
+
+def test_unsandboxed_unit_has_user_only(milliways):
+    text = (milliways[0] / "milliways-api.service").read_text()
+    assert "User=nickg\n" in text
+    assert "DynamicUser" not in text and "ProtectHome" not in text

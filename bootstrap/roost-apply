@@ -86,16 +86,41 @@ check_owned() {
     die "$target exists and is not roost-managed (sudo touch $ADOPT to adopt it)"
 }
 
+# Sandbox directives (backend.sandbox) whose value is fixed. They only take privileges away.
+declare -A SANDBOX_FIXED=(
+    [ProtectHome]=tmpfs [ProtectSystem]=strict [PrivateTmp]=yes [PrivateDevices]=yes
+    [ProtectProc]=invisible [ProtectKernelTunables]=yes [ProtectKernelModules]=yes
+    [ProtectKernelLogs]=yes [ProtectControlGroups]=yes [ProtectClock]=yes [ProtectHostname]=yes
+    [RestrictSUIDSGID]=yes [RestrictNamespaces]=yes [RestrictRealtime]=yes [LockPersonality]=yes
+    [NoNewPrivileges]=yes [CapabilityBoundingSet]=""
+    [RestrictAddressFamilies]="AF_INET AF_INET6 AF_UNIX"
+    [IPAddressAllow]=127.0.0.53 [IPAddressDeny]=localhost
+)
+
 validate_unit() {
-    local f="$1" line key val
+    local f="$1" line key val p parts users=0 dynamic=0
     head -n1 "$f" | grep -qx '# roost-managed' || die "$f: missing roost-managed marker"
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         [[ "$line" =~ ^\[(Unit|Service|Install)\]$ ]] && continue
         key="${line%%=*}"; val="${line#*=}"
+        if [[ -v "SANDBOX_FIXED[$key]" ]]; then
+            [[ "$val" == "${SANDBOX_FIXED[$key]}" ]] || die "$f: $key must be '${SANDBOX_FIXED[$key]}'"
+            continue
+        fi
         case "$key" in
             Description|After|Restart|RestartSec|WantedBy|Environment) ;;
-            User) [[ "$val" == "$ROOST_USER" ]] || die "$f: User must be $ROOST_USER" ;;
+            User) [[ "$val" == "$ROOST_USER" ]] || die "$f: User must be $ROOST_USER"; users=$((users + 1)) ;;
+            DynamicUser) [[ "$val" == yes ]] || die "$f: DynamicUser must be yes"; dynamic=1 ;;
+            StateDirectory) [[ "$val" == "$NAME" ]] || die "$f: StateDirectory must be $NAME" ;;
+            MemoryMax) [[ "$val" =~ ^[0-9]{1,5}[KMG]$ ]] || die "$f: bad MemoryMax" ;;
+            BindReadOnlyPaths)
+                read -ra parts <<<"$val"   # no glob expansion
+                for p in "${parts[@]}"; do
+                    p="${p#-}"
+                    [[ "$p" == "$APPS_ROOT"/* && "$p" != *..* && "$p" != *:* && "$p" != "$ROOST_HOME"* ]] \
+                        || die "$f: BindReadOnlyPaths must be under $APPS_ROOT (not $ROOST_HOME)"
+                done ;;
             WorkingDirectory) [[ "$val" == "$APPS_ROOT"/* && "$val" != *..* ]] || die "$f: bad WorkingDirectory" ;;
             EnvironmentFile) [[ "$val" == "-$ROOST_HOME/env/"*.env && "$val" != *..* ]] || die "$f: bad EnvironmentFile" ;;
             ExecStart)
@@ -104,6 +129,8 @@ validate_unit() {
             *) die "$f: directive '$key' not allowed" ;;
         esac
     done < "$f"
+    # A unit with no User= runs as root. Require exactly one identity.
+    (( users + dynamic == 1 )) || die "$f: needs exactly one of User=$ROOST_USER or DynamicUser=yes"
 }
 
 # only <file> <selector-regex> <allowed-regex> <msg>: every line matching the
