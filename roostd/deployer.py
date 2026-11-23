@@ -108,7 +108,7 @@ class Deployer:
         # working tree, so a skipped trigger never leaves new code checked out.
         try:
             text = subprocess.run(
-                ["git", "show", f"origin/{ref}:deploy.toml"], cwd=app_dir,
+                ["git", "show", f"refs/remotes/origin/{ref}:deploy.toml"], cwd=app_dir,
                 capture_output=True, text=True, check=True).stdout
         except subprocess.CalledProcessError:
             raise Skipped(f"{repo_name}@{ref} has no deploy.toml")
@@ -127,7 +127,7 @@ class Deployer:
             f"frontend_port={rec.frontend_port} subdomain={rec.subdomain}")
 
         _run(f"git checkout -q {shlex.quote(ref)}", app_dir, log)
-        _run(f"git reset -q --hard origin/{shlex.quote(ref)}", app_dir, log)
+        _run(f"git reset -q --hard {shlex.quote(f'refs/remotes/origin/{ref}')}", app_dir, log)
         _run("git rev-parse --short HEAD", app_dir, log)
 
         if m.backend:
@@ -150,7 +150,9 @@ class Deployer:
         if (app_dir / ".git").exists():
             # keep origin pointed at the canonical URL (repos get renamed)
             _run(f"git remote set-url origin {shlex.quote(repo_url)}", app_dir, log)
-            _run(f"git fetch -q --prune origin {shlex.quote(ref)}", app_dir, log)
+            # Branches only: a pushed tag named like the branch must never be deployed.
+            spec = shlex.quote(f"+refs/heads/{ref}:refs/remotes/origin/{ref}")
+            _run(f"git fetch -q --prune --no-tags origin {spec}", app_dir, log)
         else:
             app_dir.parent.mkdir(parents=True, exist_ok=True)
             _run(f"git clone -q {shlex.quote(repo_url)} {shlex.quote(str(app_dir))}",
