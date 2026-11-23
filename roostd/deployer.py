@@ -192,6 +192,7 @@ class Deployer:
         fqdn = f"{rec.subdomain}.{DOMAIN}" if rec.subdomain else None
         ctx = dict(
             name=m.name, fqdn=fqdn, app_dir=str(app_dir), user=RUN_USER,
+            uv_python_dir=str(APPS_ROOT / ".local/share/uv/python"),
             backend=m.backend, frontend=m.frontend,
             backend_port=rec.backend_port, frontend_port=rec.frontend_port,
             env_file=str(self.env_path(m.name)),

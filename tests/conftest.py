@@ -64,3 +64,30 @@ def stage_go(dirs, manifest=GO_MANIFEST, project_dir=""):
                      on=m.on, need_backend=True, need_frontend=False)
     deployer_mod.Deployer(reg)._stage(m, app_dir, rec, lambda _: None)
     return home / "staged" / "scruples", str(app_dir), rec
+
+
+SANDBOX_MANIFEST = """
+name = "ducksy"
+on = "ci-pass"
+
+[backend]
+workdir = "."
+start = "python -m ducksy"
+sandbox = true
+
+[backend.env]
+PORT = "{port}"
+"""
+
+
+def stage_worker(dirs, manifest=SANDBOX_MANIFEST):
+    """Stage a sandboxed background worker (no subdomain)."""
+    home, apps = dirs
+    m = Manifest.parse(manifest)
+    app_dir = apps / m.name
+    app_dir.mkdir(parents=True)
+    reg = Registry(home / "registry.json")
+    rec = reg.ensure(name=m.name, repo_name=m.name, repo_url="x", subdomain=m.subdomain,
+                     on=m.on, need_backend=True, need_frontend=False)
+    deployer_mod.Deployer(reg)._stage(m, app_dir, rec, lambda _: None)
+    return home / "staged" / m.name, str(app_dir), rec

@@ -23,6 +23,7 @@ class Backend:
     health: str | None = None     # backend-relative path, e.g. "/health"
     strip_prefix: bool = True     # nginx: /api/x -> backend /x (False keeps /api/x)
     port: int | None = None       # pin a port; otherwise allocated
+    sandbox: bool = False         # run as a throwaway DynamicUser that sees only the app dir
 
     def __post_init__(self):
         if self.project is None:
@@ -79,6 +80,8 @@ def _check_backend(be: Backend) -> None:
         raise ValueError(f"backend.runtime must be one of {RUNTIMES}, got {be.runtime!r}")
     if be.runtime == "go" and not be.build:
         raise ValueError("a go backend needs `build` (e.g. \"go build -o app .\")")
+    if not isinstance(be.sandbox, bool):
+        raise ValueError("backend.sandbox must be true or false")
     if not isinstance(be.env, dict):
         raise ValueError("backend.env must be a table")
     for k, v in be.env.items():

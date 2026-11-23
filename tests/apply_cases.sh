@@ -350,6 +350,34 @@ case_rejects_env_directive_injection() {
     need "no systemctl calls" bash -c "! grep -q '^systemctl' '$LOG'"
 }
 
+# ---- sandboxed workers -------------------------------------------------------
+D() { echo "$TEST_HOME/staged/ducksy/ducksy-api.service"; }
+rejects_ducksy() { # perl-expr message
+    reset; perl -pi -e "$1" "$(D)"; apply ducksy -
+    need "exit non-zero (rc=$RC)" fails
+    need "message '$2' ($(cat "$OUT"))" said "$2"
+    need "no systemctl calls" bash -c "! grep -q '^systemctl' '$LOG'"
+}
+case_sandboxed_worker_ok() {
+    reset; apply ducksy -
+    need "rc 0 ($(cat "$OUT"))" test $RC -eq 0
+    need "unit installed" grep -q '^DynamicUser=yes$' "$FAKE/etc/systemd/system/ducksy-api.service"
+    need "restarted" logged "systemctl restart ducksy-api"
+}
+case_rejects_unit_without_user()       { rejects milliways-api.service '$_ = "" if /^User=/' "needs exactly one of"; }
+case_rejects_dynamic_and_user()        { rejects_ducksy '$_ .= "User=nickg\n" if /^DynamicUser=/' "needs exactly one of"; }
+case_rejects_dynamic_no()              { rejects_ducksy 's/^DynamicUser=yes/DynamicUser=no/' "DynamicUser must be yes"; }
+case_rejects_sandbox_without_user()    { rejects_ducksy '$_ = "" if /^DynamicUser=/' "needs exactly one of"; }
+case_rejects_protecthome_off()         { rejects_ducksy 's/^ProtectHome=.*/ProtectHome=no/' "ProtectHome must be"; }
+case_rejects_capabilities()            { rejects_ducksy 's/^CapabilityBoundingSet=.*/CapabilityBoundingSet=CAP_SYS_ADMIN/' "CapabilityBoundingSet must be"; }
+case_rejects_ipallow_widened()         { rejects_ducksy 's/^IPAddressAllow=.*/IPAddressAllow=any/' "IPAddressAllow must be"; }
+case_rejects_bind_outside()            { rejects_ducksy 's/^BindReadOnlyPaths=.*/BindReadOnlyPaths=\/etc/' "BindReadOnlyPaths must be"; }
+case_rejects_bind_remap()              { rejects_ducksy 's/^BindReadOnlyPaths=(\S+)/BindReadOnlyPaths=$1:\/etc\/shadow/' "BindReadOnlyPaths must be"; }
+case_rejects_bind_roost_home()         { rejects_ducksy 's/^BindReadOnlyPaths=.*/BindReadOnlyPaths=$ENV{TEST_HOME}\/env/' "BindReadOnlyPaths must be"; }
+case_rejects_bindpaths_rw()            { rejects_ducksy 's/^BindReadOnlyPaths=/BindPaths=/' "not allowed"; }
+case_rejects_statedir_other()          { rejects_ducksy 's/^StateDirectory=.*/StateDirectory=milliways/' "StateDirectory must be"; }
+case_rejects_bad_memorymax()           { rejects_ducksy 's/^MemoryMax=.*/MemoryMax=infinity/' "bad MemoryMax"; }
+
 for fn in $(declare -F | awk '{print $3}' | grep '^case_'); do
     if ( "$fn" ) 2>"$W/err.txt"; then echo "RESULT ${fn#case_} PASS"
     else echo "RESULT ${fn#case_} FAIL"; sed 's/^/    /' "$W/err.txt"; sed 's/^/    out: /' "$OUT"; fi

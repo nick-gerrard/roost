@@ -33,7 +33,9 @@ tests/           pytest; tests/apply_cases.sh runs roost-apply inside ubuntu:24.
   thing as root: `/usr/local/sbin/roost-apply <name> <subdomain|->`.
 - roost-apply treats everything in `~/.roost/staged/` as hostile. It snapshots
   the staged files into a root-only temp dir, then validates them:
-  - **Units:** allow-list of directives, `User` must be ROOST_USER, `ExecStart`
+  - **Units:** allow-list of directives, exactly one of `User=ROOST_USER` or
+    `DynamicUser=yes` (a unit with neither would run as root), sandbox
+    directives (`backend.sandbox`) only with their fixed values, `ExecStart`
     must be node or under APPS_ROOT, and `EnvironmentFile` must be under
     `~/.roost/env`.
   - **nginx:** every line must match an allow-list of what `nginx.conf.j2`
